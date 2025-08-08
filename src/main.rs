@@ -26,7 +26,7 @@ use std::cmp::min;
 use std::fs::{create_dir_all, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 // use time::OffsetDateTime; // unused
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -40,8 +40,12 @@ use uuid::Uuid;
 #[command(name="rustlangextract", version, about="Rust-native structured extraction with Parquet + HTML viewer")]
 struct Cli {
     /// Input UTF-8 text file
-    #[arg(long, value_name="FILE")]
-    input: PathBuf,
+    #[arg(long, value_name="FILE", required_unless_present = "demo")]
+    input: Option<PathBuf>,
+
+    /// Run with a built-in multi-domain demo corpus
+    #[arg(long, default_value_t = false, conflicts_with = "input")]
+    demo: bool,
 
     /// Output directory (Parquet, JSONL, HTML)
     #[arg(long, value_name="DIR", default_value="./out")]
@@ -66,6 +70,10 @@ struct Cli {
     /// Max parallel chunk requests (default: num_cpus)
     #[arg(long)]
     concurrency: Option<usize>,
+
+    /// Overall HTTP request timeout in seconds (default: 120)
+    #[arg(long)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +85,7 @@ struct Config {
     max_retries: usize,
     concurrency: usize,
     out_dir: PathBuf,
+    timeout_seconds: u64,
 }
 
 // ================================
@@ -188,6 +197,7 @@ async fn call_openai_structured(
             }
         });
 
+        let send_started = Instant::now();
         info!("➡️ [OpenAI] Sending request (attempt {attempt})");
         let resp = client
             .post(url)
@@ -196,17 +206,27 @@ async fn call_openai_structured(
             .send()
             .await
             .context("OpenAI HTTP error")?;
+        let send_elapsed = send_started.elapsed();
 
         let status = resp.status();
+        let decode_started = Instant::now();
         let val: serde_json::Value = resp.json().await.context("OpenAI JSON decode")?;
+        let decode_elapsed = decode_started.elapsed();
 
         if status.is_success() {
-            info!("✅ [OpenAI] Received structured JSON");
+            info!("✅ [OpenAI] Received structured JSON (network={}ms, decode={}ms)", send_elapsed.as_millis(), decode_elapsed.as_millis());
             return Ok(val);
         }
 
         // If we got a rate-limit or transient error, retry
-        warn!("⚠️ [OpenAI] Non-success status {} on attempt {}: {}", status, attempt, val);
+        warn!(
+            "⚠️ [OpenAI] Non-success status {} on attempt {} (network={}ms, decode={}ms): {}",
+            status,
+            attempt,
+            send_elapsed.as_millis(),
+            decode_elapsed.as_millis(),
+            val
+        );
         if attempt >= max_retries {
             error!("❌ [OpenAI] Exhausted retries");
             return Err(anyhow::anyhow!("OpenAI error after {max_retries} attempts: {val}"));
@@ -636,12 +656,18 @@ async fn main() -> Result<()> {
         .context("Missing OPENAI_API_KEY env var. Set it before running.")?;
 
     // ---- Read input file ----
-    info!("📄 Reading input file: {}", cli.input.display());
     let mut text = String::new();
-    File::open(&cli.input)
-        .context("Failed to open input file")?
-        .read_to_string(&mut text)
-        .context("Failed to read input file as UTF-8")?;
+    if cli.demo {
+        info!("📄 Using built-in demo corpus (embedded)");
+        text = include_str!("../example.txt").to_string();
+    } else {
+        let input_path = cli.input.as_ref().expect("input required unless --demo");
+        info!("📄 Reading input file: {}", input_path.display());
+        File::open(input_path)
+            .context("Failed to open input file")?
+            .read_to_string(&mut text)
+            .context("Failed to read input file as UTF-8")?;
+    }
     if text.trim().is_empty() {
         warn!("Input file appears empty.");
     }
@@ -658,6 +684,7 @@ async fn main() -> Result<()> {
         max_retries: cli.max_retries,
         concurrency,
         out_dir: cli.out_dir.clone(),
+        timeout_seconds: cli.timeout_seconds.unwrap_or(120),
     };
 
     // ---- Prepare outputs ----
@@ -728,6 +755,9 @@ async fn main() -> Result<()> {
     // ---- HTTP client ----
     let client = Client::builder()
         .gzip(true)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(cfg.timeout_seconds))
+        .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .context("HTTP client build failed")?;
 

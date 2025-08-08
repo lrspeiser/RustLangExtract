@@ -762,40 +762,10 @@ async fn main() -> Result<()> {
                         "extraction_text": {"type": "string"},
                         "start_char": {"type": "integer"},
                         "end_char": {"type": "integer"},
-                        "attributes": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "unit": {"type": "string"},
-                                "currency": {"type": "string"},
-                                "role": {"type": "string"},
-                                "dose": {"type": "string"},
-                                "frequency": {"type": "string"},
-                                "route": {"type": "string"},
-                                "code": {"type": "string"},
-                                "description": {"type": "string"},
-                                "jurisdiction": {"type": "string"},
-                                "qty": {"type": "number"},
-                                "unit_price": {"type": "number"},
-                                "line_total": {"type": "number"},
-                                "amount": {"type": "number"},
-                                "low": {"type": "number"},
-                                "high": {"type": "number"},
-                                "timestamp": {"type": "string"},
-                                "side": {"type": "string"},
-                                "symbol": {"type": "string"},
-                                "address": {"type": "string"},
-                                "city": {"type": "string"},
-                                "state": {"type": "string"},
-                                "zip": {"type": "string"},
-                                "phone": {"type": "string"},
-                                "email": {"type": "string"},
-                                "product": {"type": "string"},
-                                "organization": {"type": "string"},
-                                "person": {"type": "string"},
-                                "type": {"type": "string"}
-                            }
-                        }
+          "attributes": {
+            "type": "object",
+            "additionalProperties": true
+          }
                     },
                     "required": [
                         "extraction_class",

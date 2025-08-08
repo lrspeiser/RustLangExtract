@@ -764,7 +764,9 @@ async fn main() -> Result<()> {
                         "end_char": {"type": "integer"},
           "attributes": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": false,
+            "properties": {},
+            "required": []
           }
                     },
                     "required": [

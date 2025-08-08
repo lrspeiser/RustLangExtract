@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! RustLangExtract
 //! ----------------
 //! Standalone Rust tool to extract structured data from large text files using
@@ -74,6 +75,14 @@ struct Cli {
     /// Overall HTTP request timeout in seconds (default: 120)
     #[arg(long)]
     timeout_seconds: Option<u64>,
+
+    /// Optional file containing a custom prompt/instructions to control what to extract
+    #[arg(long, value_name="FILE")]
+    prompt_file: Option<PathBuf>,
+
+    /// Comma-separated list of classes to extract (e.g., "character,emotion,relationship")
+    #[arg(long, value_name="CSV")]
+    classes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -840,17 +849,33 @@ async fn main() -> Result<()> {
         For each entity, use exact substrings from the given text and provide 0-based character spans \
         relative to the given CHUNK text (start inclusive, end exclusive).";
 
-    let instruction = r#"
-Task:
-- Extract entities of *any* class you detect that seem meaningful (e.g., names, dates, amounts, medications, clauses, emotions, etc.).
-- For each entity:
-  - `extraction_class`: a short label like "name", "date", "amount", "medication", "clause", "emotion".
-  - `extraction_text`: EXACT substring from the text (no paraphrasing).
-  - `start_char` and `end_char`: 0-based indices referring to **this chunk** only.
-  - `attributes`: a JSON object with helpful fields (e.g., {"unit":"USD"} or {"sentiment":"positive"}). Empty object if none.
+    // Base instruction
+    let mut final_instruction = String::from(
+        "Task:\n\
+        - Extract concrete entities across domains (e.g., people, organizations, dates, amounts, medications, clauses, emotions).\n\
+        - For each entity:\n\
+          - extraction_class: a short label (e.g., name, date, amount, medication, clause, emotion).\n\
+          - extraction_text: EXACT substring from the text (no paraphrasing).\n\
+          - start_char and end_char: 0-based indices relative to THIS CHUNK only.\n\
+          - attributes: JSON with helpful fields (empty object if none).\n\
+        Return JSON EXACTLY matching the provided schema. Do NOT include extra keys."
+    );
 
-Return JSON EXACTLY matching the provided schema. Do NOT include any extra keys.
-"#;
+    // If user provided a prompt file, override base instruction
+    if let Some(prompt_path) = &cli.prompt_file {
+        let mut buf = String::new();
+        File::open(prompt_path)
+            .context("Failed to open prompt file")?
+            .read_to_string(&mut buf)
+            .context("Failed to read prompt file as UTF-8")?;
+        final_instruction = buf;
+    }
+
+    // If classes are provided, append a directive to focus only on those
+    if let Some(classes_csv) = &cli.classes {
+        final_instruction.push_str("\n\nOnly extract the following classes (ignore others): ");
+        final_instruction.push_str(classes_csv);
+    }
 
     // ---- Process chunks in parallel ----
     let batches: Vec<ExtractionBatch> = pool.install(|| {
@@ -860,7 +885,11 @@ Return JSON EXACTLY matching the provided schema. Do NOT include any extra keys.
             .map(|(_i, (chunk_text, offset, chunk_id))| {
                 // Build user prompt with chunk context
                 let user_prompt = format!(
-                    "{instruction}\n\nCHUNK_ID: {chunk_id}\nCHUNK_OFFSET_IN_DOCUMENT: {offset}\n\nTEXT:\n{chunk_text}"
+                    "{}\n\nCHUNK_ID: {}\nCHUNK_OFFSET_IN_DOCUMENT: {}\n\nTEXT:\n{}",
+                    final_instruction,
+                    chunk_id,
+                    offset,
+                    chunk_text
                 );
 
                 // BLOCK ON async call inside rayon worker:

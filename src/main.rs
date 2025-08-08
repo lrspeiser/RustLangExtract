@@ -83,6 +83,10 @@ struct Cli {
     /// Comma-separated list of classes to extract (e.g., "character,emotion,relationship")
     #[arg(long, value_name="CSV")]
     classes: Option<String>,
+
+    /// Built-in preset of instructions (e.g., medical, finance, legal)
+    #[arg(long, value_name="NAME")]
+    preset: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -841,6 +845,24 @@ async fn main() -> Result<()> {
             .read_to_string(&mut buf)
             .context("Failed to read prompt file as UTF-8")?;
         final_instruction = buf;
+    }
+
+    // Or load a built-in preset if requested (and no prompt_file override)
+    if final_instruction.starts_with("Task:") {
+        if let Some(preset) = &cli.preset {
+            match preset.as_str() {
+                "medical" => {
+                    final_instruction = include_str!("../prompts/medical.txt").to_string();
+                }
+                "finance" => {
+                    final_instruction = include_str!("../prompts/finance.txt").to_string();
+                }
+                "legal" => {
+                    final_instruction = include_str!("../prompts/legal.txt").to_string();
+                }
+                _ => {}
+            }
+        }
     }
 
     // If classes are provided, append a directive to focus only on those

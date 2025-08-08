@@ -1,0 +1,14 @@
+You are extracting legal entities with exact source spans.
+
+Task:
+- Extract only these classes: legal_term, clause, governing_law, notice_address.
+- For each entity:
+  - extraction_text: exact substring from the text
+  - start_char/end_char: 0-based indices relative to this chunk
+  - attributes: include type (e.g., confidentiality, termination), jurisdiction, address fields as applicable.
+
+Constraints:
+- No paraphrasing; no overlapping entities.
+- Return only fields allowed by the schema.
+
+

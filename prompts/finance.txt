@@ -1,0 +1,14 @@
+You are extracting financial entities with exact source spans.
+
+Task:
+- Extract only these classes: revenue, guidance, trade, invoice_id, line_item, total_due.
+- For each entity:
+  - extraction_text: exact substring from the text
+  - start_char/end_char: 0-based indices relative to this chunk
+  - attributes: include units, currency, amounts, symbol, side, qty, price, product, qty, unit_price, line_total as applicable.
+
+Constraints:
+- No paraphrasing; no overlapping entities.
+- Return only fields allowed by the schema.
+
+

@@ -27,7 +27,7 @@ use std::fs::{create_dir_all, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use time::OffsetDateTime;
+// use time::OffsetDateTime; // unused
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ struct Cli {
     out_dir: PathBuf,
 
     /// OpenAI model ID (e.g., gpt-5.0-mini, gpt-5.0, etc.)
-    #[arg(long, default_value="gpt-5.0-mini")]
+    #[arg(long, default_value="gpt-5")]
     model: String,
 
     /// Characters per chunk
@@ -171,16 +171,16 @@ async fn call_openai_structured(
             "input": [
               {
                 "role": "system",
-                "content": [{ "type":"text", "text": system_prompt }]
+                "content": [{ "type":"input_text", "text": system_prompt }]
               },
               {
                 "role": "user",
-                "content": [{ "type":"text", "text": user_prompt }]
+                "content": [{ "type":"input_text", "text": user_prompt }]
               }
             ],
-            "response_format": {
-              "type": "json_schema",
-              "json_schema": {
+            "text": {
+              "format": {
+                "type": "json_schema",
                 "name": "extractions_schema",
                 "schema": json_schema,
                 "strict": true
@@ -347,7 +347,8 @@ fn write_parquet<P: AsRef<Path>>(batches: &[ExtractionBatch], path: P) -> Result
         Field::new("attributes_json", DataType::Binary, false),
     ]);
 
-    let chunk = Chunk::try_new(vec![
+    // Build Chunk<Box<dyn Array>> to satisfy parquet writer trait bounds
+    let columns: Vec<Box<dyn arrow2::array::Array>> = vec![
         Box::new(Utf8Array::<i32>::from_slice(doc_id)),
         Box::new(Utf8Array::<i32>::from_slice(chunk_id)),
         Box::new(Utf8Array::<i32>::from_slice(class)),
@@ -355,7 +356,8 @@ fn write_parquet<P: AsRef<Path>>(batches: &[ExtractionBatch], path: P) -> Result
         Box::new(UInt64Array::from_slice(start)),
         Box::new(UInt64Array::from_slice(end)),
         Box::new(BinaryArray::<i32>::from_slice(attrs)),
-    ])?;
+    ];
+    let chunk = Chunk::try_new(columns)?;
 
     let options = pq::WriteOptions {
         write_statistics: true,
@@ -364,21 +366,82 @@ fn write_parquet<P: AsRef<Path>>(batches: &[ExtractionBatch], path: P) -> Result
         data_pagesize_limit: None,
     };
 
-    let row_groups = vec![pq::RowGroupIterator::try_new(
+    // Per-column encoding (one Vec<Encoding> per leaf/column). Flat schema => one encoding per column.
+    let encodings: Vec<Vec<pq::Encoding>> = schema
+        .fields
+        .iter()
+        .map(|_| vec![pq::Encoding::Plain])
+        .collect();
+
+    let row_groups = pq::RowGroupIterator::try_new(
         std::iter::once(Ok(chunk)),
         &schema,
         options,
-        pq::Encoding::Plain,
-    )?];
+        encodings,
+    )?;
 
     let mut file = File::create(path)?;
     let mut writer = pq::FileWriter::try_new(&mut file, schema, options)?;
-    for mut rg in row_groups {
-        writer.write(&mut rg)?;
+    for rg in row_groups {
+        writer.write(rg?)?;
     }
     writer.end(None)?;
     info!("✅ Parquet write complete");
     Ok(())
+}
+
+// ================================
+// JSON Schema utilities
+// ================================
+fn enforce_no_additional_properties(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    match schema {
+        Value::Object(map) => {
+            let is_object_type = map
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "object")
+                .unwrap_or(false)
+                || map.contains_key("properties");
+            if is_object_type && !map.contains_key("additionalProperties") {
+                map.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+            // Recurse common schema carriers
+            if let Some(props) = map.get_mut("properties") {
+                if let Value::Object(props_map) = props {
+                    for (_k, v) in props_map.iter_mut() {
+                        enforce_no_additional_properties(v);
+                    }
+                }
+            }
+            if let Some(items) = map.get_mut("items") {
+                enforce_no_additional_properties(items);
+            }
+            for key in ["definitions", "$defs", "allOf", "anyOf", "oneOf"].iter() {
+                if let Some(val) = map.get_mut(*key) {
+                    match val {
+                        Value::Object(obj) => {
+                            for (_k, v) in obj.iter_mut() {
+                                enforce_no_additional_properties(v);
+                            }
+                        }
+                        Value::Array(arr) => {
+                            for v in arr.iter_mut() {
+                                enforce_no_additional_properties(v);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                enforce_no_additional_properties(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ================================
@@ -588,8 +651,41 @@ async fn main() -> Result<()> {
     info!("⚙️  ChunkSize={}, Overlap={}, Concurrency={}", cfg.chunk_size, cfg.overlap, cfg.concurrency);
 
     // ---- Build JSON Schema from our Rust types ----
-    let schema = schema_for!(ExtractionBatch);
-    let schema_json = serde_json::to_value(&schema.schema).context("Serialize schema")?;
+    // Build a strict JSON Schema manually for structured outputs
+    let schema_json = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "document_id": {"type": "string"},
+            "chunk_id": {"type": "string"},
+            "extractions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "extraction_class": {"type": "string"},
+                        "extraction_text": {"type": "string"},
+                        "start_char": {"type": "integer"},
+                        "end_char": {"type": "integer"},
+                        "attributes": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {}
+                        }
+                    },
+                    "required": [
+                        "extraction_class",
+                        "extraction_text",
+                        "start_char",
+                        "end_char",
+                        "attributes"
+                    ]
+                }
+            }
+        },
+        "required": ["document_id", "chunk_id", "extractions"]
+    });
 
     // ---- Chunk input ----
     let chunks = chunk_document(&text, cfg.chunk_size, cfg.overlap);
@@ -644,10 +740,10 @@ Return JSON EXACTLY matching the provided schema. Do NOT include any extra keys.
         chunks
             .par_iter()
             .enumerate()
-            .map(|(i, (chunk_text, offset, chunk_id))| {
+            .map(|(_i, (chunk_text, offset, chunk_id))| {
                 // Build user prompt with chunk context
                 let user_prompt = format!(
-                    "CHUNK_ID: {chunk_id}\nCHUNK_OFFSET_IN_DOCUMENT: {offset}\n\nTEXT:\n{chunk_text}"
+                    "{instruction}\n\nCHUNK_ID: {chunk_id}\nCHUNK_OFFSET_IN_DOCUMENT: {offset}\n\nTEXT:\n{chunk_text}"
                 );
 
                 // BLOCK ON async call inside rayon worker:
@@ -660,7 +756,7 @@ Return JSON EXACTLY matching the provided schema. Do NOT include any extra keys.
                     &api_key,
                     &cfg.model,
                     system_prompt,
-                    &instruction,
+                    &user_prompt,
                     &schema_json,
                     cfg.max_retries,
                 ));

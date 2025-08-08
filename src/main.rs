@@ -175,12 +175,50 @@ async fn call_openai_structured(
     loop {
         attempt += 1;
 
+        // Few-shot example to guide extraction
+        let example_text = "ROMEO. But soft! What light through yonder window breaks? It is the east, and Juliet is the sun.";
+        let example_output = json!({
+            "document_id": "demo-doc",
+            "chunk_id": "example-000",
+            "extractions": [
+                {
+                    "extraction_class": "character",
+                    "extraction_text": "ROMEO",
+                    "start_char": 0,
+                    "end_char": 5,
+                    "attributes": {"role": "speaker"}
+                },
+                {
+                    "extraction_class": "emotion",
+                    "extraction_text": "But soft!",
+                    "start_char": 7,
+                    "end_char": 16,
+                    "attributes": {"type": "awe"}
+                },
+                {
+                    "extraction_class": "relationship",
+                    "extraction_text": "Juliet is the sun",
+                    "start_char": 86,
+                    "end_char": 103,
+                    "attributes": {"type": "metaphor"}
+                }
+            ]
+        }).to_string();
+
         let body = json!({
             "model": model,
             "input": [
               {
                 "role": "system",
                 "content": [{ "type":"input_text", "text": system_prompt }]
+              },
+              {
+                "role": "user",
+                "content": [{ "type":"input_text", "text": example_text }]
+              },
+              {
+                "role": "assistant",
+                "content": [{ "type":"output_text", "text": example_output }]
               },
               {
                 "role": "user",
@@ -718,7 +756,36 @@ async fn main() -> Result<()> {
                         "attributes": {
                             "type": "object",
                             "additionalProperties": false,
-                            "properties": {}
+                            "properties": {
+                                "unit": {"type": "string"},
+                                "currency": {"type": "string"},
+                                "role": {"type": "string"},
+                                "dose": {"type": "string"},
+                                "frequency": {"type": "string"},
+                                "route": {"type": "string"},
+                                "code": {"type": "string"},
+                                "description": {"type": "string"},
+                                "jurisdiction": {"type": "string"},
+                                "qty": {"type": "number"},
+                                "unit_price": {"type": "number"},
+                                "line_total": {"type": "number"},
+                                "amount": {"type": "number"},
+                                "low": {"type": "number"},
+                                "high": {"type": "number"},
+                                "timestamp": {"type": "string"},
+                                "side": {"type": "string"},
+                                "symbol": {"type": "string"},
+                                "address": {"type": "string"},
+                                "city": {"type": "string"},
+                                "state": {"type": "string"},
+                                "zip": {"type": "string"},
+                                "phone": {"type": "string"},
+                                "email": {"type": "string"},
+                                "product": {"type": "string"},
+                                "organization": {"type": "string"},
+                                "person": {"type": "string"},
+                                "type": {"type": "string"}
+                            }
                         }
                     },
                     "required": [

@@ -1,3 +1,176 @@
-On 2025-08-05, Experiment Beta showed acceleration of 9.81 m/s².
+MULTI-DOMAIN SAMPLE CORPUS
+====================================
+
+SECTION: ACADEMIC (ABSTRACT)
+------------------------------------
+Title: Effects of Sleep Duration on Cognitive Performance in Adults
+Authors: Smith, J.; Patel, R.; Chen, L.
+Journal: Journal of Behavioral Science, Vol 42(7), 2024-11-14
+Abstract: We conducted a randomized controlled trial (n=240) to measure the impact of sleep duration on reaction time and working memory. Participants were assigned to 5h, 7h, or 9h sleep conditions for 14 days. Primary endpoints included median reaction time (ms) and n-back accuracy (%). Compared to 7h, the 5h group showed a 18.4% increase in reaction time and a 9.7% reduction in accuracy (p<0.01). The 9h group showed a 4.2% improvement in accuracy (p=0.04) with no significant change in reaction time. Limitations include self-reported adherence and single-site sampling. Future work should examine chronic effects beyond 30 days.
+
+SECTION: ACADEMIC (REFERENCES)
+------------------------------------
+[1] Van Dongen, H.P.A. et al. Sleep, 2003.
+[2] Lim, J. and Dinges, D.F. Nat Rev Neurosci, 2010.
+[3] Walker, M. Why We Sleep, 2017.
+
+---
+
+SECTION: MEDICAL (CLINICAL NOTE)
+------------------------------------
+Patient: John Doe, MRN: 12345678, DOB: 1982-03-04, Sex: M
+Encounter Date: 2025-07-29 09:43
+Chief Complaint: Chest discomfort with exertion for 2 weeks.
+HPI: 43-year-old male with intermittent substernal pressure during brisk walking, lasting 5-10 minutes, relieved by rest. No syncope. Mild dyspnea. Family history positive for premature CAD (father at 52).
+PMH: Hypertension (2019), Hyperlipidemia (2020), GERD (2015).
+Allergies: NKDA.
+Meds: Lisinopril 10 mg PO daily; Atorvastatin 20 mg PO nightly; Omeprazole 20 mg PO daily; Aspirin 81 mg PO daily.
+Vitals: BP 138/86 mmHg, HR 82 bpm, RR 16, Temp 98.4 F, SpO2 98% RA, BMI 27.9 kg/m2.
+Exam: Normal S1/S2, no murmurs, lungs clear, no edema.
+Labs (2025-07-29): TC 212 mg/dL, LDL 142 mg/dL, HDL 41 mg/dL, TG 168 mg/dL, A1c 5.7%.
+ECG: Normal sinus rhythm, no ST-T changes.
+Assessment: Stable angina vs non-cardiac chest pain.
+Plan: Stress test ordered. Increase Atorvastatin to 40 mg nightly. Continue Aspirin 81 mg. Lifestyle counseling. Return precautions reviewed.
+ICD-10: I20.8 (Angina pectoris), E78.5 (Hyperlipidemia), I10 (Hypertension).
+
+---
+
+SECTION: FINANCE (EARNINGS EXCERPT)
+------------------------------------
+Company: ACME Robotics, Inc. (Ticker: ACRB)
+Quarter: Q2 FY2025 (Ended: 2025-06-30)
+Revenue: 412,500,000 USD (+18% YoY)
+Gross Margin: 64.3%
+Operating Income: 58,200,000 USD
+GAAP EPS: 0.84; Non-GAAP EPS: 1.02
+Cash and Cash Equivalents: 276,400,000 USD
+Guidance: FY2025 revenue 1.58B - 1.62B USD; operating margin 12% - 14%.
+Notable: Signed 3 enterprise deals > 20M USD each; launched ACME Vision 3.2.
+
+SECTION: FINANCE (TRANSACTIONS LOG)
+------------------------------------
+2025-07-08, 09:45:11, BUY, AAPL, 150, 231.42
+2025-07-08, 09:50:03, SELL, TSLA, 25, 261.05
+2025-07-08, 10:15:49, BUY, ACRB, 400, 38.70
+2025-07-09, 13:02:17, DIVIDEND, MSFT, 0, 198.00
+
+---
+
+SECTION: LEGAL (NDA CLAUSE)
+------------------------------------
+Definitions: "Confidential Information" means any non-public information disclosed by Discloser to Recipient, whether oral or written, that is designated as confidential or that a reasonable person would understand to be confidential.
+Obligations: Recipient shall (a) not disclose Confidential Information to any third party; (b) use the Confidential Information solely to evaluate the proposed transaction; and (c) protect the Confidential Information using at least the same degree of care it uses for its own confidential information, but no less than reasonable care.
+Term: 3 years from the Effective Date.
+Governing Law: State of California, without regard to conflict of laws principles.
+Notices: To Discloser, 123 Market St, San Francisco, CA 94105. To Recipient, 456 Main Ave, New York, NY 10012.
+
+SECTION: LEGAL (TERMINATION CLAUSE)
+------------------------------------
+Either party may terminate this Agreement for convenience upon 30 days written notice. Upon termination, Recipient shall promptly return or destroy all Confidential Information and certify such destruction in writing.
+
+---
+
+SECTION: E-COMMERCE (INVOICE)
+------------------------------------
+Invoice No: INV-2025-0731-00982
+Invoice Date: 2025-07-31
+Bill To: Blue Ocean Analytics, 27 Harbor Rd, Boston, MA 02114
+Ship To: Blue Ocean Analytics, 27 Harbor Rd, Boston, MA 02114
+Items:
+  1) Laptop Pro 14, Qty 3, Unit 1,899.00 USD, Line 5,697.00 USD
+  2) USB-C Dock, Qty 5, Unit 129.00 USD, Line 645.00 USD
+  3) Support Plan 1Y, Qty 3, Unit 199.00 USD, Line 597.00 USD
+Subtotal: 6,939.00 USD
+Discount: 5% (-346.95 USD)
+Shipping: 45.00 USD
+Tax (8.875%): 586.12 USD
+Total Due: 7,223.17 USD
+Payment Terms: Net 30
+
+---
+
+SECTION: CUSTOMER SUPPORT (TICKETS)
+------------------------------------
+Ticket #84127, 2025-07-10 14:22, Priority: High
+Subject: API 500 errors after upgrade
+Body: Since updating to v2.4.1, POST /v2/jobs occasionally returns 500. We see timeouts from the upstream billing service. Can you advise?
+
+Ticket #84203, 2025-07-12 09:05, Priority: Low
+Subject: How to export CSV
+Body: Where can I find the CSV export for the new dashboard? The button moved.
+
+---
+
+SECTION: NEWS (PRESS RELEASE)
+------------------------------------
+FOR IMMEDIATE RELEASE, 2025-07-22
+TechNova announces the general availability of EdgeML 1.0, a compact inference engine for on-device classification. EdgeML reduces latency by 43% on average while maintaining accuracy within 1% of server baselines. Early customers include HealthWay and FinSight.
+Contact: press@technova.example, +1-415-555-0149
+
+---
+
+SECTION: TECHNOLOGY (LOG SNIPPET)
+------------------------------------
+2025-07-29T08:15:23Z INFO worker-1 accepted task job_id=7b21a2 status=queued
+2025-07-29T08:15:24Z WARN worker-1 retrying fetch attempt=2 delay_ms=500
+2025-07-29T08:15:25Z ERROR worker-1 failed cause=timeout upstream=payments
+2025-07-29T08:15:26Z INFO worker-1 completed job_id=7b21a2 duration_ms=1189
+
+---
+
+SECTION: EDUCATION (SYLLABUS EXCERPT)
+------------------------------------
+Course: Introduction to Data Ethics (CS-185)
+Instructor: Alicia Gomez, PhD
+Schedule: Tue/Thu 10:30-11:45
+Grading: Homework 40%, Midterm 25%, Final Project 35%
+Week 1: Privacy foundations
+Week 2: Fairness metrics
+Week 3: Transparency and interpretability
+Week 4: Accountability and governance
+Final Project: Case study with dataset audit and mitigation plan.
+
+---
+
+SECTION: SPORTS (BOX SCORE)
+------------------------------------
+Game: Falcons at Titans, 2025-07-18
+Score by Quarter: Q1 7-3, Q2 10-7, Q3 3-3, Q4 14-0, Final 34-13
+Passing: J. Harris 21/32, 264 yds, 2 TD, 1 INT
+Rushing: L. Brown 18 att, 92 yds, 1 TD
+Receiving: M. Allen 7 rec, 88 yds, 1 TD
+Penalties: 7 for 55 yds
+
+---
+
+SECTION: REAL ESTATE (LISTING)
+------------------------------------
+MLS ID: 2025-CA-009381
+Address: 915 Cedar St, San Mateo, CA 94401
+Beds: 3, Baths: 2, Sq Ft: 1,740, Lot: 5,200, Year: 1958
+List Price: 1,398,000 USD
+Description: Updated kitchen with quartz counters, hardwood floors, new roof (2023), EV-ready garage. Near parks and schools.
+Open House: 2025-08-10 13:00-16:00
+
+---
+
+SECTION: CONTACTS (CSV-LIKE)
+------------------------------------
+name,email,phone,company
+Jane Miller,jane.miller@example.com,+1-212-555-0130,Northwind
+Omar Khan,omar.khan@example.com,+1-206-555-0177,Contoso
+Sara Lee,sara.lee@example.com,+44-20-7946-0958,Fabrikam
+
+---
+
+SECTION: POETRY (PUBLIC DOMAIN)
+------------------------------------
 ROMEO: But soft! What light through yonder window breaks?
-Juliet is the sun.
+It is the east, and Juliet is the sun.
+
+SECTION: MISC (MEASUREMENTS)
+------------------------------------
+On 2025-08-05, Experiment Beta measured acceleration of 9.81 m/s2 and velocity of 3.2 m/s after 0.65 s.
+Temperature readings: 72 F indoor, 88 F outdoor.
+
+END OF CORPUS

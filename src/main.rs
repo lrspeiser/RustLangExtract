@@ -223,9 +223,29 @@ async fn call_openai_structured(
 
 /// Extract the JSON block that matches our schema from the Responses API payload.
 fn extract_json_payload(val: &serde_json::Value) -> Result<serde_json::Value> {
-    // Try common path: "output" -> already parsed
-    if let Some(v) = val.get("output") {
-        return Ok(v.clone());
+    // 1) New Responses API may return structured content under `output`.
+    // If `output` is an array of messages, extract first `output_text`.
+    if let Some(output) = val.get("output") {
+        if output.is_array() {
+            if let Some(arr) = output.as_array() {
+                for item in arr {
+                    if let Some(contents) = item.get("content").and_then(|c| c.as_array()) {
+                        for c in contents {
+                            if c.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
+                                    let parsed: serde_json::Value = serde_json::from_str(text)
+                                        .context("Failed to parse output_text in output[] as JSON")?;
+                                    return Ok(parsed);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if output.is_object() {
+            // Some SDKs return the structured JSON directly under `output`
+            return Ok(output.clone());
+        }
     }
 
     // Try content[0].text
@@ -240,7 +260,7 @@ fn extract_json_payload(val: &serde_json::Value) -> Result<serde_json::Value> {
         }
     }
 
-    // Some SDKs return `output_text` at top-level (rare)
+    // Some SDKs return `output_text` at top-level
     if let Some(text) = val.get("output_text").and_then(|t| t.as_str()) {
         let parsed: serde_json::Value =
             serde_json::from_str(text).context("Failed to parse output_text as JSON")?;

@@ -1,0 +1,12 @@
+
+---
+
+## 🧹 `.gitignore`
+
+```gitignore
+/target
+.DS_Store
+*.parquet
+*.jsonl
+/out
+.env

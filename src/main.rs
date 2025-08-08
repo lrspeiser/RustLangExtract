@@ -1,0 +1,733 @@
+//! RustLangExtract
+//! ----------------
+//! Standalone Rust tool to extract structured data from large text files using
+//! OpenAI (GPT-5) with **Structured Outputs (JSON Schema)**.
+//!
+//! Pipeline:
+//!   input.txt -> chunk -> call LLM -> strict JSON -> merge spans -> Parquet + JSONL + HTML viewer
+//!
+//! Major design goals:
+//!  - SAFE: no Python, memory-safe chunking, strict schema outputs
+//!  - AUDITABLE: every extraction includes exact source spans (start_char/end_char)
+//!  - ANALYTICS-READY: writes Parquet for instant DuckDB/Polars querying
+//!
+//! Console logging: very verbose so you can follow step-by-step.
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use reqwest::Client;
+use ropey::Rope;
+use schemars::{schema_for, JsonSchema};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::cmp::min;
+use std::fs::{create_dir_all, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use time::OffsetDateTime;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
+
+// ================================
+// CLI + Config
+// ================================
+
+#[derive(Debug, Parser)]
+#[command(name="rustlangextract", version, about="Rust-native structured extraction with Parquet + HTML viewer")]
+struct Cli {
+    /// Input UTF-8 text file
+    #[arg(long, value_name="FILE")]
+    input: PathBuf,
+
+    /// Output directory (Parquet, JSONL, HTML)
+    #[arg(long, value_name="DIR", default_value="./out")]
+    out_dir: PathBuf,
+
+    /// OpenAI model ID (e.g., gpt-5.0-mini, gpt-5.0, etc.)
+    #[arg(long, default_value="gpt-5.0-mini")]
+    model: String,
+
+    /// Characters per chunk
+    #[arg(long, default_value_t=10_000)]
+    chunk_size: usize,
+
+    /// Overlap between chunks (to avoid boundary misses)
+    #[arg(long, default_value_t=500)]
+    overlap: usize,
+
+    /// Max retries for API calls
+    #[arg(long, default_value_t=3)]
+    max_retries: usize,
+
+    /// Max parallel chunk requests (default: num_cpus)
+    #[arg(long)]
+    concurrency: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct Config {
+    document_id: String,
+    model: String,
+    chunk_size: usize,
+    overlap: usize,
+    max_retries: usize,
+    concurrency: usize,
+    out_dir: PathBuf,
+}
+
+// ================================
+// Schema: What we want the model to return (STRICT)
+// ================================
+
+/// One extracted item tied to exact source text and global offsets.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Extraction {
+    /// Category/class of extraction, e.g., "medication", "date", "clause", "character"
+    pub extraction_class: String,
+    /// Exact substring from the source text
+    pub extraction_text: String,
+    /// Inclusive char start index in the ORIGINAL full document (we shift from chunk-local)
+    pub start_char: usize,
+    /// Exclusive char end index
+    pub end_char: usize,
+    /// Optional attributes map, can hold any JSON (numbers, strings, nested objects)
+    pub attributes: serde_json::Value,
+}
+
+/// A batch for one chunk of the document.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExtractionBatch {
+    pub document_id: String,
+    pub chunk_id: String,
+    pub extractions: Vec<Extraction>,
+}
+
+// ================================
+// Chunking
+// ================================
+
+/// Chunk the big document into overlapping slices for the model.
+/// We use Rope for safe Unicode slicing on large strings.
+fn chunk_document(text: &str, chunk_size: usize, overlap: usize) -> Vec<(String, usize, String)> {
+    let rope = Rope::from_str(text);
+    let len = rope.len_chars();
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+
+    let pad = ((len as f64).log10().floor() as usize) + 1;
+    let mut idx = 0usize;
+
+    while start < len {
+        let end = min(start + chunk_size, len);
+        let slice = rope.slice(start..end).to_string();
+        let chunk_id = format!("chunk-{:0width$}", idx, width = pad);
+        chunks.push((slice, start, chunk_id));
+        if end == len {
+            break;
+        }
+        start = end.saturating_sub(overlap);
+        idx += 1;
+    }
+    chunks
+}
+
+// ================================
+/* OpenAI client (Structured Outputs via Responses API)
+   We enforce our JSON Schema so the model MUST return schema-valid JSON.
+
+   Response shape (simplified expected):
+   {
+     "output": { ... },  // may be present depending on SDK
+     "content": [
+        { "type":"output_text", "text":"{...JSON matching our schema...}" }
+     ],
+     ...
+   }
+*/
+async fn call_openai_structured(
+    client: &Client,
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    json_schema: &serde_json::Value,
+    max_retries: usize,
+) -> Result<serde_json::Value> {
+    let url = "https://api.openai.com/v1/responses";
+
+    // Exponential backoff parameters
+    let mut attempt = 0usize;
+    let mut delay_ms = 750u64;
+
+    loop {
+        attempt += 1;
+
+        let body = json!({
+            "model": model,
+            "input": [
+              {
+                "role": "system",
+                "content": [{ "type":"text", "text": system_prompt }]
+              },
+              {
+                "role": "user",
+                "content": [{ "type":"text", "text": user_prompt }]
+              }
+            ],
+            "response_format": {
+              "type": "json_schema",
+              "json_schema": {
+                "name": "extractions_schema",
+                "schema": json_schema,
+                "strict": true
+              }
+            }
+        });
+
+        info!("➡️ [OpenAI] Sending request (attempt {attempt})");
+        let resp = client
+            .post(url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("OpenAI HTTP error")?;
+
+        let status = resp.status();
+        let val: serde_json::Value = resp.json().await.context("OpenAI JSON decode")?;
+
+        if status.is_success() {
+            info!("✅ [OpenAI] Received structured JSON");
+            return Ok(val);
+        }
+
+        // If we got a rate-limit or transient error, retry
+        warn!("⚠️ [OpenAI] Non-success status {} on attempt {}: {}", status, attempt, val);
+        if attempt >= max_retries {
+            error!("❌ [OpenAI] Exhausted retries");
+            return Err(anyhow::anyhow!("OpenAI error after {max_retries} attempts: {val}"));
+        }
+
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        delay_ms = (delay_ms as f64 * 1.75).min(5000.0) as u64;
+    }
+}
+
+// ================================
+// Output parsing (model → our types)
+// ================================
+
+/// Extract the JSON block that matches our schema from the Responses API payload.
+fn extract_json_payload(val: &serde_json::Value) -> Result<serde_json::Value> {
+    // Try common path: "output" -> already parsed
+    if let Some(v) = val.get("output") {
+        return Ok(v.clone());
+    }
+
+    // Try content[0].text
+    if let Some(arr) = val.get("content").and_then(|c| c.as_array()) {
+        if let Some(first) = arr.first() {
+            if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
+                // text is JSON string; parse it
+                let parsed: serde_json::Value = serde_json::from_str(text)
+                    .context("Failed to parse model's output_text as JSON")?;
+                return Ok(parsed);
+            }
+        }
+    }
+
+    // Some SDKs return `output_text` at top-level (rare)
+    if let Some(text) = val.get("output_text").and_then(|t| t.as_str()) {
+        let parsed: serde_json::Value =
+            serde_json::from_str(text).context("Failed to parse output_text as JSON")?;
+        return Ok(parsed);
+    }
+
+    Err(anyhow::anyhow!(
+        "Could not find JSON matching schema in model response"
+    ))
+}
+
+/// Parse into `ExtractionBatch` and shift local chunk offsets to GLOBAL offsets.
+fn parse_batch_from_payload(
+    payload: &serde_json::Value,
+    document_id: &str,
+    chunk_id: &str,
+    chunk_offset: usize,
+) -> Result<ExtractionBatch> {
+    // Payload should match our schema (ExtractionBatch) — if model obeyed schema.
+    // If it returned just an array of extractions, we handle that too.
+    let mut batch: ExtractionBatch = if payload.get("extractions").is_some() {
+        // Case A: full schema present
+        let mut tmp: ExtractionBatch = serde_json::from_value(payload.clone())
+            .context("Failed to deserialize ExtractionBatch from payload")?;
+        // Overwrite doc/chunk IDs with our authoritative IDs
+        tmp.document_id = document_id.to_string();
+        tmp.chunk_id = chunk_id.to_string();
+        tmp
+    } else if payload.is_array() {
+        // Case B: model returned just an array -> wrap it
+        let mut exts: Vec<Extraction> = serde_json::from_value(payload.clone())
+            .context("Failed to deserialize [Extraction] from payload")?;
+        ExtractionBatch {
+            document_id: document_id.to_string(),
+            chunk_id: chunk_id.to_string(),
+            extractions: exts.drain(..).collect(),
+        }
+    } else {
+        // Case C: model returned an object like { "extractions": [...] } but missing ids
+        let exts = payload
+            .get("extractions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let exts: Vec<Extraction> = exts
+            .into_iter()
+            .map(|e| serde_json::from_value(e).unwrap())
+            .collect();
+        ExtractionBatch {
+            document_id: document_id.to_string(),
+            chunk_id: chunk_id.to_string(),
+            extractions: exts,
+        }
+    };
+
+    // Shift local chunk spans -> global spans
+    for e in &mut batch.extractions {
+        e.start_char += chunk_offset;
+        e.end_char += chunk_offset;
+    }
+
+    Ok(batch)
+}
+
+// ================================
+// Parquet writer (Arrow2)
+// ================================
+fn write_parquet<P: AsRef<Path>>(batches: &[ExtractionBatch], path: P) -> Result<()> {
+    use arrow2::array::{BinaryArray, UInt64Array, Utf8Array};
+    use arrow2::chunk::Chunk;
+    use arrow2::datatypes::{DataType, Field, Schema};
+    use arrow2::io::parquet::write as pq;
+
+    info!("💾 Writing {} batches to Parquet: {}", batches.len(), path.as_ref().display());
+
+    // Flatten rows
+    let mut doc_id = Vec::new();
+    let mut chunk_id = Vec::new();
+    let mut class = Vec::new();
+    let mut text = Vec::new();
+    let mut start = Vec::new();
+    let mut end = Vec::new();
+    let mut attrs = Vec::new();
+
+    for b in batches {
+        for e in &b.extractions {
+            doc_id.push(b.document_id.clone());
+            chunk_id.push(b.chunk_id.clone());
+            class.push(e.extraction_class.clone());
+            text.push(e.extraction_text.clone());
+            start.push(e.start_char as u64);
+            end.push(e.end_char as u64);
+            attrs.push(serde_json::to_vec(&e.attributes).unwrap_or_default());
+        }
+    }
+
+    let schema = Schema::from(vec![
+        Field::new("document_id", DataType::Utf8, false),
+        Field::new("chunk_id", DataType::Utf8, false),
+        Field::new("extraction_class", DataType::Utf8, false),
+        Field::new("extraction_text", DataType::Utf8, false),
+        Field::new("start_char", DataType::UInt64, false),
+        Field::new("end_char", DataType::UInt64, false),
+        Field::new("attributes_json", DataType::Binary, false),
+    ]);
+
+    let chunk = Chunk::try_new(vec![
+        Box::new(Utf8Array::<i32>::from_slice(doc_id)),
+        Box::new(Utf8Array::<i32>::from_slice(chunk_id)),
+        Box::new(Utf8Array::<i32>::from_slice(class)),
+        Box::new(Utf8Array::<i32>::from_slice(text)),
+        Box::new(UInt64Array::from_slice(start)),
+        Box::new(UInt64Array::from_slice(end)),
+        Box::new(BinaryArray::<i32>::from_slice(attrs)),
+    ])?;
+
+    let options = pq::WriteOptions {
+        write_statistics: true,
+        compression: pq::CompressionOptions::Zstd(None),
+        version: pq::Version::V2,
+        data_pagesize_limit: None,
+    };
+
+    let row_groups = vec![pq::RowGroupIterator::try_new(
+        std::iter::once(Ok(chunk)),
+        &schema,
+        options,
+        pq::Encoding::Plain,
+    )?];
+
+    let mut file = File::create(path)?;
+    let mut writer = pq::FileWriter::try_new(&mut file, schema, options)?;
+    for mut rg in row_groups {
+        writer.write(&mut rg)?;
+    }
+    writer.end(None)?;
+    info!("✅ Parquet write complete");
+    Ok(())
+}
+
+// ================================
+// JSONL writer (for debugging / portability)
+// ================================
+fn write_jsonl<P: AsRef<Path>>(batches: &[ExtractionBatch], path: P) -> Result<()> {
+    info!("🧾 Writing JSONL: {}", path.as_ref().display());
+    let mut f = File::create(path)?;
+    for b in batches {
+        writeln!(f, "{}", serde_json::to_string(b)?)?;
+    }
+    Ok(())
+}
+
+// ================================
+// HTML Viewer (simple, self-contained)
+// ================================
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Build a very simple highlight viewer:
+/// - Full source text displayed
+/// - Extractions table on top
+/// - Clicking a row scrolls to the highlighted region
+fn write_viewer<P: AsRef<Path>>(
+    full_text: &str,
+    batches: &[ExtractionBatch],
+    path: P,
+) -> Result<()> {
+    info!("🖼️ Writing HTML viewer: {}", path.as_ref().display());
+
+    // Build a flat list of extractions with ids for anchors
+    #[derive(Clone)]
+    struct Row<'a> {
+        id: String,
+        class: &'a str,
+        text: String,
+        start: usize,
+        end: usize,
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+    for (i, b) in batches.iter().enumerate() {
+        for (j, e) in b.extractions.iter().enumerate() {
+            let id = format!("ext-{}-{}", i, j);
+            rows.push(Row {
+                id,
+                class: &e.extraction_class,
+                text: html_escape(&e.extraction_text),
+                start: e.start_char,
+                end: e.end_char,
+            });
+        }
+    }
+
+    // Build highlighted text by slicing and inserting <mark> tags.
+    // NOTE: We need to avoid offset shifting as we insert tags; build in one pass.
+    let mut pieces: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+
+    // Sort by start ascending, then end ascending (stable)
+    rows.sort_by_key(|r| (r.start, r.end));
+
+    for r in &rows {
+        if r.start > full_text.len() || r.end > full_text.len() || r.start >= r.end {
+            continue; // skip invalid spans silently
+        }
+        // text before highlight
+        if r.start > cursor {
+            pieces.push(html_escape(&full_text[cursor..r.start]));
+        }
+        // the highlighted region
+        let segment = html_escape(&full_text[r.start..r.end]);
+        pieces.push(format!(
+            r#"<a id="{id}"></a><mark title="{class} [{start}..{end}]">{segment}</mark>"#,
+            id = r.id,
+            class = r.class,
+            start = r.start,
+            end = r.end,
+            segment = segment
+        ));
+        cursor = r.end;
+    }
+    // tail
+    if cursor < full_text.len() {
+        pieces.push(html_escape(&full_text[cursor..]));
+    }
+
+    let highlighted = pieces.join("");
+
+    let mut html = String::new();
+    html.push_str(r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>RustLangExtract Viewer</title>
+<style>
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid #ddd; }
+tr:hover { background: #f6f6f6; cursor: pointer; }
+mark { background: #fffb8f; padding: 0 2px; border-radius: 2px; }
+.code { white-space: pre-wrap; border: 1px solid #eee; padding: 12px; border-radius: 8px; }
+.small { color: #666; font-size: 12px; }
+</style>
+<script>
+function jumpTo(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Flash the mark briefly
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 500);
+  }
+}
+</script>
+</head>
+<body>
+<h1>RustLangExtract Viewer</h1>
+<p class="small">Click a row to jump to that exact highlighted span below.</p>
+<table>
+<thead><tr><th>Class</th><th>Text</th><th>Span</th></tr></thead>
+<tbody>
+"#);
+
+    for r in &rows {
+        html.push_str(&format!(
+            r#"<tr onclick="jumpTo('{id}')"><td>{class}</td><td>{text}</td><td>[{start}..{end}]</td></tr>"#,
+            id = r.id,
+            class = r.class,
+            text = r.text,
+            start = r.start,
+            end = r.end
+        ));
+    }
+
+    html.push_str(r#"
+</tbody>
+</table>
+<div class="code">"#);
+    html.push_str(&highlighted);
+    html.push_str(r#"</div>
+</body>
+</html>
+"#);
+
+    let mut f = File::create(path)?;
+    f.write_all(html.as_bytes())?;
+    Ok(())
+}
+
+// ================================
+// Main
+// ================================
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // ---- Logging setup ----
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_target(false)
+        .compact()
+        .init();
+
+    let cli = Cli::parse();
+
+    // ---- Resolve OpenAI API key ----
+    dotenvy::dotenv().ok(); // loads variables from .env if present
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .context("Missing OPENAI_API_KEY env var. Set it before running.")?;
+
+    // ---- Read input file ----
+    info!("📄 Reading input file: {}", cli.input.display());
+    let mut text = String::new();
+    File::open(&cli.input)
+        .context("Failed to open input file")?
+        .read_to_string(&mut text)
+        .context("Failed to read input file as UTF-8")?;
+    if text.trim().is_empty() {
+        warn!("Input file appears empty.");
+    }
+
+    // ---- Prepare config ----
+    let concurrency = cli
+        .concurrency
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let cfg = Config {
+        document_id: Uuid::new_v4().to_string(),
+        model: cli.model,
+        chunk_size: cli.chunk_size,
+        overlap: cli.overlap,
+        max_retries: cli.max_retries,
+        concurrency,
+        out_dir: cli.out_dir.clone(),
+    };
+
+    // ---- Prepare outputs ----
+    create_dir_all(&cfg.out_dir).context("Failed to create out-dir")?;
+    let parquet_path = cfg.out_dir.join("extractions.parquet");
+    let jsonl_path = cfg.out_dir.join("extractions.jsonl");
+    let html_path = cfg.out_dir.join("view.html");
+
+    info!("🆔 Document ID: {}", cfg.document_id);
+    info!("🧠 Model: {}", cfg.model);
+    info!("⚙️  ChunkSize={}, Overlap={}, Concurrency={}", cfg.chunk_size, cfg.overlap, cfg.concurrency);
+
+    // ---- Build JSON Schema from our Rust types ----
+    let schema = schema_for!(ExtractionBatch);
+    let schema_json = serde_json::to_value(&schema.schema).context("Serialize schema")?;
+
+    // ---- Chunk input ----
+    let chunks = chunk_document(&text, cfg.chunk_size, cfg.overlap);
+    info!("🪚 Created {} chunks", chunks.len());
+    if chunks.is_empty() {
+        warn!("No chunks created. Nothing to do.");
+        return Ok(());
+    }
+
+    // ---- Progress bars ----
+    let mp = MultiProgress::new();
+    let pb = mp.add(ProgressBar::new(chunks.len() as u64));
+    pb.set_style(
+        ProgressStyle::with_template("{spinner} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message("extracting…");
+
+    // ---- HTTP client ----
+    let client = Client::builder()
+        .gzip(true)
+        .build()
+        .context("HTTP client build failed")?;
+
+    // ---- Rayon thread pool limit ----
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(cfg.concurrency)
+        .build()
+        .context("Failed to build Rayon thread pool")?;
+
+    // ---- LLM prompts ----
+    let system_prompt = "You are a precise information extraction engine. \
+        You ONLY return JSON that matches the provided JSON Schema. \
+        For each entity, use exact substrings from the given text and provide 0-based character spans \
+        relative to the given CHUNK text (start inclusive, end exclusive).";
+
+    let instruction = r#"
+Task:
+- Extract entities of *any* class you detect that seem meaningful (e.g., names, dates, amounts, medications, clauses, emotions, etc.).
+- For each entity:
+  - `extraction_class`: a short label like "name", "date", "amount", "medication", "clause", "emotion".
+  - `extraction_text`: EXACT substring from the text (no paraphrasing).
+  - `start_char` and `end_char`: 0-based indices referring to **this chunk** only.
+  - `attributes`: a JSON object with helpful fields (e.g., {"unit":"USD"} or {"sentiment":"positive"}). Empty object if none.
+
+Return JSON EXACTLY matching the provided schema. Do NOT include any extra keys.
+"#;
+
+    // ---- Process chunks in parallel ----
+    let batches: Vec<ExtractionBatch> = pool.install(|| {
+        chunks
+            .par_iter()
+            .enumerate()
+            .map(|(i, (chunk_text, offset, chunk_id))| {
+                // Build user prompt with chunk context
+                let user_prompt = format!(
+                    "CHUNK_ID: {chunk_id}\nCHUNK_OFFSET_IN_DOCUMENT: {offset}\n\nTEXT:\n{chunk_text}"
+                );
+
+                // BLOCK ON async call inside rayon worker:
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                let result = rt.block_on(call_openai_structured(
+                    &client,
+                    &api_key,
+                    &cfg.model,
+                    system_prompt,
+                    &instruction,
+                    &schema_json,
+                    cfg.max_retries,
+                ));
+
+                pb.inc(1);
+
+                match result {
+                    Ok(resp) => {
+                        // Pull the JSON payload matching our schema
+                        match extract_json_payload(&resp)
+                            .and_then(|p| parse_batch_from_payload(&p, &cfg.document_id, chunk_id, *offset))
+                        {
+                            Ok(mut batch) => {
+                                // Optional: de-dup overlapping duplicates within this batch
+                                dedupe_extractions(&mut batch.extractions);
+                                Ok(batch)
+                            }
+                            Err(e) => {
+                                error!("Parse error on {}: {}", chunk_id, e);
+                                Err(e)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("OpenAI error on {}: {}", chunk_id, e);
+                        Err(e)
+                    }
+                }
+            })
+            .filter_map(|r| r.ok())
+            .collect()
+    });
+
+    pb.finish_with_message("done");
+
+    info!("🧮 Collected {} batches", batches.len());
+
+    // ---- Write outputs ----
+    write_parquet(&batches, &parquet_path)?;
+    write_jsonl(&batches, &jsonl_path)?;
+    write_viewer(&text, &batches, &html_path)?;
+
+    info!("📦 Outputs:");
+    info!("  • Parquet: {}", parquet_path.display());
+    info!("  • JSONL:   {}", jsonl_path.display());
+    info!("  • HTML:    {}", html_path.display());
+
+    info!("✅ All done.");
+    Ok(())
+}
+
+// Simple de-duplication within a batch to reduce overlap repeats.
+// Strategy: same (class, text, start, end) => keep first.
+fn dedupe_extractions(extractions: &mut Vec<Extraction>) {
+    use std::collections::HashSet;
+    let mut seen = HashSet::<(String, String, usize, usize)>::new();
+    let mut out = Vec::with_capacity(extractions.len());
+    for e in extractions.drain(..) {
+        let key = (
+            e.extraction_class.clone(),
+            e.extraction_text.clone(),
+            e.start_char,
+            e.end_char,
+        );
+        if seen.insert(key) {
+            out.push(e);
+        }
+    }
+    *extractions = out;
+}
